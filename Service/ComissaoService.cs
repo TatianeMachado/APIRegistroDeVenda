@@ -1,21 +1,21 @@
 ﻿using APIregistroDeVenda.Context;
 using APIregistroDeVenda.Domain;
 using APIregistroDeVenda.DTO;
-using Microsoft.EntityFrameworkCore;
+using APIregistroDeVenda.Repository;
 
 namespace APIregistroDeVenda.Service;
 
 public class ComissaoService
 {
-    private readonly AppDbContext _context;
+    private readonly IVendaComissaoRepository _repository;
 
-    public ComissaoService(AppDbContext context)
+    public ComissaoService(IVendaComissaoRepository repository)
     {
-        _context = context;
+        _repository = repository;
     }
 
     public async Task<int> CadastrarAsync(
-        ComissaoCalcularRequest request)
+    ComissaoCalcularRequest request)
     {
         var vendas = request.Vendas
             .Select(venda => new VendaComissao
@@ -25,32 +25,48 @@ public class ComissaoService
             })
             .ToList();
 
-        _context.VendasComissao.AddRange(vendas);
-
-        await _context.SaveChangesAsync();
+        await _repository.AdicionarAsync(vendas);
 
         return vendas.Count;
     }
-
-    public async Task<List<ComissaoVendedorResponse>> ConsultarAsync()
+    public async Task<VendaComissaoResponse?> AtualizarAsync(
+    int id,
+    VendaComissaoAtualizarRequest request)
     {
-        var vendas = await _context.VendasComissao
-            .AsNoTracking()
-            .Select(venda => new VendaComissaoRequest
-            {
-                Vendedor = venda.Vendedor,
-                Valor = venda.Valor
-            })
-            .ToListAsync();
+        var venda = await _repository.ConsultarPorIdAsync(id);
 
-        var request = new ComissaoCalcularRequest
+        if (venda is null)
         {
-            Vendas = vendas
-        };
+            return null;
+        }
 
-        return Calcular(request);
+        venda.Vendedor = request.Vendedor!;
+        venda.Valor = request.Valor!.Value;
+
+        await _repository.AtualizarAsync(venda);
+
+        return new VendaComissaoResponse
+        {
+            VendaComissaoId = venda.VendaComissaoId,
+            Vendedor = venda.Vendedor,
+            Valor = venda.Valor,
+            Comissao = CalcularComissao(venda.Valor)
+        };
     }
 
+    public async Task<bool> ExcluirAsync(int id)
+    {
+        var venda = await _repository.ConsultarPorIdAsync(id);
+
+        if (venda is null)
+        {
+            return false;
+        }
+
+        await _repository.ExcluirAsync(venda);
+
+        return true;
+    }
     public List<ComissaoVendedorResponse> Calcular(
         ComissaoCalcularRequest request)
     {
@@ -81,9 +97,7 @@ public class ComissaoService
 
     public async Task<VendaComissaoResponse?> ConsultarPorIdAsync(int id)
     {
-        var venda = await _context.VendasComissao
-            .AsNoTracking()
-            .SingleOrDefaultAsync(v => v.VendaComissaoId == id);
+        var venda = await _repository.ConsultarPorIdAsync(id);
 
         if (venda is null)
         {
@@ -98,75 +112,29 @@ public class ComissaoService
             Comissao = CalcularComissao(venda.Valor)
         };
     }
-    public async Task<VendaComissaoResponse?> AtualizarAsync(
-    int id,
-    VendaComissaoAtualizarRequest request)
-    {
-        var venda = await _context.VendasComissao
-            .SingleOrDefaultAsync(v => v.VendaComissaoId == id);
 
-        if (venda is null)
-        {
-            return null;
-        }
-
-        venda.Vendedor = request.Vendedor!;
-        venda.Valor = request.Valor!.Value;
-
-        await _context.SaveChangesAsync();
-
-        return new VendaComissaoResponse
-        {
-            VendaComissaoId = venda.VendaComissaoId,
-            Vendedor = venda.Vendedor,
-            Valor = venda.Valor,
-            Comissao = CalcularComissao(venda.Valor)
-        };
-    }
-    public async Task<bool> ExcluirAsync(int id)
-    {
-        var venda = await _context.VendasComissao
-            .SingleOrDefaultAsync(v => v.VendaComissaoId == id);
-
-        if (venda is null)
-        {
-            return false;
-        }
-
-        _context.VendasComissao.Remove(venda);
-
-        await _context.SaveChangesAsync();
-
-        return true;
-    }
 
     //EXATAMENTE O DESAFIO
+
     public async Task<VendasResponse> ListarVendasAsync()
     {
-        var vendas = await _context.VendasComissao
-            .AsNoTracking()
-            .OrderBy(v => v.VendaComissaoId)
-            .Select(v => new VendaRegistroResponse
-            {
-                Vendedor = v.Vendedor,
-                Valor = v.Valor
-            })
-            .ToListAsync();
+        var vendas = await _repository.ListarAsync();
 
         return new VendasResponse
         {
             Vendas = vendas
+                .Select(venda => new VendaRegistroResponse
+                {
+                    Vendedor = venda.Vendedor,
+                    Valor = venda.Valor
+                })
+                .ToList()
         };
     }
 
-    //EXATAMENTE O DESAFIO
-
     public async Task<List<ComissaoFaixaResponse>> ConsultarPorFaixaAsync()
     {
-        var vendas = await _context.VendasComissao
-            .AsNoTracking()
-            .OrderBy(v => v.VendaComissaoId)
-            .ToListAsync();
+        var vendas = await _repository.ListarAsync();
 
         var faixas = new List<ComissaoFaixaResponse>
     {
@@ -195,7 +163,9 @@ public class ComissaoService
 
             decimal comissao = CalcularComissao(venda.Valor);
 
-            faixas[indice].Vendas.Add(new VendaComissaoResponse
+            var faixa = faixas[indice];
+
+            faixa.Vendas.Add(new VendaComissaoResponse
             {
                 VendaComissaoId = venda.VendaComissaoId,
                 Vendedor = venda.Vendedor,
@@ -203,7 +173,7 @@ public class ComissaoService
                 Comissao = comissao
             });
 
-            faixas[indice].TotalComissao += comissao;
+            faixa.TotalComissao += comissao;
         }
 
         return faixas;
