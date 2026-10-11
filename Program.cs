@@ -1,29 +1,41 @@
 using APIregistroDeVenda.Context;
+using APIregistroDeVenda.Repository;
 using APIregistroDeVenda.Service;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-
 builder.Services.AddControllers();
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-var mysqlConnection = builder.Configuration.GetConnectionString("DefaultConnection");
-builder.Services.AddDbContext<AppDbContext>(options => options.UseMySql(mysqlConnection, ServerVersion.AutoDetect(mysqlConnection)));
+var mysqlConnection =
+    builder.Configuration.GetConnectionString("DefaultConnection");
 
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseMySql(
+        mysqlConnection,
+        ServerVersion.AutoDetect(mysqlConnection)));
 
+// Repositórios
+builder.Services.AddScoped<
+    IVendaComissaoRepository,
+    VendaComissaoRepository>();
+
+builder.Services.AddScoped<
+    IMovimentacaoEstoqueRepository,
+    MovimentacaoEstoqueRepository>();
+
+// Relógio
+builder.Services.AddSingleton<IRelogio, Relogio>();
+
+// Services
 builder.Services.AddScoped<ComissaoService>();
 builder.Services.AddScoped<MovimentacaoEstoqueService>();
 builder.Services.AddScoped<JurosService>();
 
-
-
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();

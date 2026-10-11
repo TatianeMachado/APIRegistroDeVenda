@@ -1,229 +1,148 @@
-﻿using System.Data;
-using APIregistroDeVenda.Context;
-using APIregistroDeVenda.Domain;
+﻿using APIregistroDeVenda.Domain;
 using APIregistroDeVenda.DTO;
-using Microsoft.EntityFrameworkCore;
+using APIregistroDeVenda.Repository;
 
 namespace APIregistroDeVenda.Service;
 
 public class MovimentacaoEstoqueService
 {
-    private readonly AppDbContext _context;
+    private readonly IMovimentacaoEstoqueRepository _repository;
 
-    public MovimentacaoEstoqueService(AppDbContext context)
+    public MovimentacaoEstoqueService(
+        IMovimentacaoEstoqueRepository repository)
     {
-        _context = context;
+        _repository = repository;
     }
 
     public async Task<MovimentacaoEstoqueResponse> CriarAsync(
         MovimentacaoEstoqueCriarRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.CodigoProduto))
-            throw new ArgumentException("Informe o código do produto.");
-
-        if (request.Quantidade is null || request.Quantidade <= 0)
-            throw new ArgumentException(
-                "A quantidade deve ser maior que zero.");
-
-        if (request.Tipo != TipoMovimentacao.Entrada &&
-            request.Tipo != TipoMovimentacao.Saida)
         {
             throw new ArgumentException(
-                "Informe entrada ou saída.");
+                "Informe o código do produto.");
         }
 
-        await using var transaction =
-            await _context.Database.BeginTransactionAsync(
-                IsolationLevel.Serializable);
+        ValidarMovimentacao(request.Quantidade, request.Tipo);
 
-        var produto = await _context.Produtos
-            .SingleOrDefaultAsync(
-                p => p.CodigoProduto == request.CodigoProduto);
+        return await _repository
+            .ExecutarEmTransacaoAsync<MovimentacaoEstoqueResponse>(
+                async () =>
+                {
+                    var produto =
+                        await _repository.ConsultarProdutoPorCodigoAsync(
+                            request.CodigoProduto);
 
-        if (produto is null)
-            throw new KeyNotFoundException("Produto não encontrado.");
+                    if (produto is null)
+                    {
+                        throw new KeyNotFoundException(
+                            "Produto não encontrado.");
+                    }
 
-        int quantidade = request.Quantidade.Value;
-        TipoMovimentacao tipo = request.Tipo.Value;
+                    int quantidade = request.Quantidade!.Value;
+                    TipoMovimentacao tipo = request.Tipo!.Value;
 
-        // checked impede ultrapassar a capacidade numérica do int.
-        int estoqueFinal = tipo == TipoMovimentacao.Entrada
-            ? checked(produto.Estoque + quantidade)
-            : checked(produto.Estoque - quantidade);
+                    int estoqueFinal =
+                        tipo == TipoMovimentacao.Entrada
+                            ? checked(produto.Estoque + quantidade)
+                            : checked(produto.Estoque - quantidade);
 
-        produto.Estoque = estoqueFinal;
+                    produto.Estoque = estoqueFinal;
 
-        var movimentacao = new MovimentacaoEstoque
-        {
-            ProdutoId = produto.ProdutoId,
-            Tipo = tipo,
-            Descricao = tipo == TipoMovimentacao.Entrada
-                ? "Entrada de mercadoria"
-                : "Saída de mercadoria",
-            Quantidade = quantidade,
-            EstoqueFinal = estoqueFinal,
-            DataMovimentacao = DateTime.UtcNow
-        };
+                    var movimentacao = new MovimentacaoEstoque
+                    {
+                        ProdutoId = produto.ProdutoId,
+                        Tipo = tipo,
+                        Descricao = ObterDescricao(tipo),
+                        Quantidade = quantidade,
+                        EstoqueFinal = estoqueFinal,
+                        DataMovimentacao = DateTime.UtcNow
+                    };
 
-        _context.MovimentacoesEstoque.Add(movimentacao);
+                    _repository.Adicionar(movimentacao);
 
-        await _context.SaveChangesAsync();
-        await transaction.CommitAsync();
+                    await _repository.SalvarAsync();
 
-        return new MovimentacaoEstoqueResponse
-        {
-            MovimentacaoEstoqueId =
-                movimentacao.MovimentacaoEstoqueId,
-            CodigoProduto = produto.CodigoProduto!,
-            DescricaoProduto = produto.Descricao!,
-            Tipo = movimentacao.Tipo,
-            Descricao = movimentacao.Descricao,
-            Quantidade = movimentacao.Quantidade,
-            EstoqueFinal = movimentacao.EstoqueFinal,
-            DataMovimentacao = movimentacao.DataMovimentacao
-        };
+                    return CriarResponse(movimentacao, produto);
+                });
     }
+
     public async Task<MovimentacaoEstoqueResponse?> AtualizarAsync(
-       int id,
-       MovimentacaoEstoqueAtualizarRequest request)
+        int id,
+        MovimentacaoEstoqueAtualizarRequest request)
     {
-        if (request.Quantidade is null || request.Quantidade <= 0)
-        {
-            throw new ArgumentException(
-                "A quantidade deve ser maior que zero.");
-        }
+        ValidarMovimentacao(request.Quantidade, request.Tipo);
 
-        if (request.Tipo != TipoMovimentacao.Entrada &&
-            request.Tipo != TipoMovimentacao.Saida)
-        {
-            throw new ArgumentException("Informe entrada ou saída.");
-        }
+        return await _repository
+            .ExecutarEmTransacaoAsync<MovimentacaoEstoqueResponse?>(
+                async () =>
+                {
+                    var movimentacao =
+                        await _repository.ConsultarMovimentacaoAsync(id);
 
-        await using var transaction =
-            await _context.Database.BeginTransactionAsync(
-                IsolationLevel.Serializable);
+                    if (movimentacao is null)
+                    {
+                        return null;
+                    }
 
-        var movimentacao = await _context.MovimentacoesEstoque
-            .SingleOrDefaultAsync(m => m.MovimentacaoEstoqueId == id);
+                    var produto =
+                        await _repository.ConsultarProdutoPorIdAsync(
+                            movimentacao.ProdutoId);
 
-        if (movimentacao is null)
-        {
-            return null;
-        }
+                    var posteriores =
+                        await _repository.ConsultarPosterioresAsync(
+                            movimentacao.ProdutoId,
+                            movimentacao.MovimentacaoEstoqueId);
 
-        var produto = await _context.Produtos
-            .SingleAsync(p => p.ProdutoId == movimentacao.ProdutoId);
+                    long efeitoAnterior = CalcularEfeito(
+                        movimentacao.Tipo,
+                        movimentacao.Quantidade);
 
-        var posteriores = await _context.MovimentacoesEstoque
-            .Where(m =>
-                m.ProdutoId == movimentacao.ProdutoId &&
-                m.MovimentacaoEstoqueId > movimentacao.MovimentacaoEstoqueId)
-            .OrderBy(m => m.MovimentacaoEstoqueId)
-            .ToListAsync();
+                    TipoMovimentacao tipoNovo = request.Tipo!.Value;
+                    int quantidadeNova = request.Quantidade!.Value;
 
-        long efeitoAnterior =
-            movimentacao.Tipo == TipoMovimentacao.Entrada
-                ? movimentacao.Quantidade
-                : -(long)movimentacao.Quantidade;
+                    long efeitoNovo = CalcularEfeito(
+                        tipoNovo,
+                        quantidadeNova);
 
-        TipoMovimentacao tipoNovo = request.Tipo.Value;
-        int quantidadeNova = request.Quantidade.Value;
+                    long diferenca = efeitoNovo - efeitoAnterior;
 
-        long efeitoNovo =
-            tipoNovo == TipoMovimentacao.Entrada
-                ? quantidadeNova
-                : -(long)quantidadeNova;
+                    movimentacao.Tipo = tipoNovo;
+                    movimentacao.Quantidade = quantidadeNova;
+                    movimentacao.Descricao = ObterDescricao(tipoNovo);
 
-        long diferenca = efeitoNovo - efeitoAnterior;
+                    movimentacao.EstoqueFinal = checked(
+                        (int)((long)movimentacao.EstoqueFinal + diferenca));
 
-        movimentacao.Tipo = tipoNovo;
-        movimentacao.Quantidade = quantidadeNova;
-        movimentacao.Descricao =
-            tipoNovo == TipoMovimentacao.Entrada
-                ? "Entrada de mercadoria"
-                : "Saída de mercadoria";
+                    foreach (var posterior in posteriores)
+                    {
+                        posterior.EstoqueFinal = checked(
+                            (int)((long)posterior.EstoqueFinal + diferenca));
+                    }
 
-        movimentacao.EstoqueFinal = checked(
-            (int)((long)movimentacao.EstoqueFinal + diferenca));
+                    produto.Estoque = checked(
+                        (int)((long)produto.Estoque + diferenca));
 
-        foreach (var posterior in posteriores)
-        {
-            posterior.EstoqueFinal = checked(
-                (int)((long)posterior.EstoqueFinal + diferenca));
-        }
+                    await _repository.SalvarAsync();
 
-        produto.Estoque = checked(
-            (int)((long)produto.Estoque + diferenca));
-
-        // A data original permanece igual.
-        await _context.SaveChangesAsync();
-        await transaction.CommitAsync();
-
-        return new MovimentacaoEstoqueResponse
-        {
-            MovimentacaoEstoqueId = movimentacao.MovimentacaoEstoqueId,
-            CodigoProduto = produto.CodigoProduto!,
-            Tipo = movimentacao.Tipo,
-            Descricao = movimentacao.Descricao,
-            DescricaoProduto = produto.Descricao!,
-            Quantidade = movimentacao.Quantidade,
-            EstoqueFinal = movimentacao.EstoqueFinal,
-            DataMovimentacao = movimentacao.DataMovimentacao
-        };
+                    return CriarResponse(movimentacao, produto);
+                });
     }
 
     public async Task<List<MovimentacaoEstoqueResponse>> ConsultarAsync()
     {
-        return await _context.MovimentacoesEstoque
-            .AsNoTracking()
-            .OrderBy(m => m.MovimentacaoEstoqueId)
-            .Select(m => new MovimentacaoEstoqueResponse
-            {
-                MovimentacaoEstoqueId = m.MovimentacaoEstoqueId,
-                CodigoProduto = m.Produto!.CodigoProduto!,
-                DescricaoProduto = m.Produto!.Descricao!,
-                Tipo = m.Tipo,
-                Descricao = m.Descricao,
-                Quantidade = m.Quantidade,
-                EstoqueFinal = m.EstoqueFinal,
-                DataMovimentacao = m.DataMovimentacao
-            })
-            .ToListAsync();
+        return await _repository.ListarAsync();
     }
 
-    public async Task<MovimentacaoEstoqueResponse?> ConsultarPorIdAsync(int id)
+    public async Task<MovimentacaoEstoqueResponse?> ConsultarPorIdAsync(
+        int id)
     {
-        return await _context.MovimentacoesEstoque
-            .AsNoTracking()
-            .Where(m => m.MovimentacaoEstoqueId == id)
-            .Select(m => new MovimentacaoEstoqueResponse
-            {
-                MovimentacaoEstoqueId = m.MovimentacaoEstoqueId,
-                CodigoProduto = m.Produto!.CodigoProduto!,
-                DescricaoProduto = m.Produto!.Descricao!,
-                Tipo = m.Tipo,
-                Descricao = m.Descricao,
-                Quantidade = m.Quantidade,
-                EstoqueFinal = m.EstoqueFinal,
-                DataMovimentacao = m.DataMovimentacao
-            })
-            .SingleOrDefaultAsync();
+        return await _repository.ConsultarPorIdAsync(id);
     }
-
-    //EXATAMENTE O DESAFIO
 
     public async Task<EstoqueResponse> ConsultarEstoqueAsync()
     {
-        var produtos = await _context.Produtos
-            .AsNoTracking()
-            .OrderBy(p => p.ProdutoId)
-            .Select(p => new ProdutoEstoqueResponse
-            {
-                CodigoProduto = p.CodigoProduto!,
-                DescricaoProduto = p.Descricao!,
-                Estoque = p.Estoque
-            })
-            .ToListAsync();
+        var produtos = await _repository.ConsultarEstoqueAsync();
 
         return new EstoqueResponse
         {
@@ -233,46 +152,95 @@ public class MovimentacaoEstoqueService
 
     public async Task<bool> ExcluirAsync(int id)
     {
-        await using var transaction =
-            await _context.Database.BeginTransactionAsync(
-                IsolationLevel.Serializable);
+        return await _repository.ExecutarEmTransacaoAsync<bool>(
+            async () =>
+            {
+                var movimentacao =
+                    await _repository.ConsultarMovimentacaoAsync(id);
 
-        var movimentacao = await _context.MovimentacoesEstoque
-            .SingleOrDefaultAsync(m => m.MovimentacaoEstoqueId == id);
+                if (movimentacao is null)
+                {
+                    return false;
+                }
 
-        if (movimentacao is null)
+                var produto =
+                    await _repository.ConsultarProdutoPorIdAsync(
+                        movimentacao.ProdutoId);
+
+                var posteriores =
+                    await _repository.ConsultarPosterioresAsync(
+                        movimentacao.ProdutoId,
+                        movimentacao.MovimentacaoEstoqueId);
+
+                long efeito = CalcularEfeito(
+                    movimentacao.Tipo,
+                    movimentacao.Quantidade);
+
+                produto.Estoque = checked(
+                    (int)((long)produto.Estoque - efeito));
+
+                foreach (var posterior in posteriores)
+                {
+                    posterior.EstoqueFinal = checked(
+                        (int)((long)posterior.EstoqueFinal - efeito));
+                }
+
+                _repository.Remover(movimentacao);
+
+                await _repository.SalvarAsync();
+
+                return true;
+            });
+    }
+
+    private static void ValidarMovimentacao(
+        int? quantidade,
+        TipoMovimentacao? tipo)
+    {
+        if (quantidade is null || quantidade <= 0)
         {
-            return false;
+            throw new ArgumentException(
+                "A quantidade deve ser maior que zero.");
         }
 
-        var produto = await _context.Produtos
-            .SingleAsync(p => p.ProdutoId == movimentacao.ProdutoId);
-
-        var posteriores = await _context.MovimentacoesEstoque
-            .Where(m =>
-                m.ProdutoId == movimentacao.ProdutoId &&
-                m.MovimentacaoEstoqueId > movimentacao.MovimentacaoEstoqueId)
-            .ToListAsync();
-
-        long efeito =
-            movimentacao.Tipo == TipoMovimentacao.Entrada
-                ? movimentacao.Quantidade
-                : -(long)movimentacao.Quantidade;
-
-        produto.Estoque = checked(
-            (int)((long)produto.Estoque - efeito));
-
-        foreach (var posterior in posteriores)
+        if (tipo != TipoMovimentacao.Entrada &&
+            tipo != TipoMovimentacao.Saida)
         {
-            posterior.EstoqueFinal = checked(
-                (int)((long)posterior.EstoqueFinal - efeito));
+            throw new ArgumentException(
+                "Informe entrada ou saída.");
         }
+    }
 
-        _context.MovimentacoesEstoque.Remove(movimentacao);
+    private static long CalcularEfeito(
+        TipoMovimentacao tipo,
+        int quantidade)
+    {
+        return tipo == TipoMovimentacao.Entrada
+            ? quantidade
+            : -(long)quantidade;
+    }
 
-        await _context.SaveChangesAsync();
-        await transaction.CommitAsync();
+    private static string ObterDescricao(TipoMovimentacao tipo)
+    {
+        return tipo == TipoMovimentacao.Entrada
+            ? "Entrada de mercadoria"
+            : "Saída de mercadoria";
+    }
 
-        return true;
+    private static MovimentacaoEstoqueResponse CriarResponse(
+        MovimentacaoEstoque movimentacao,
+        Produto produto)
+    {
+        return new MovimentacaoEstoqueResponse
+        {
+            MovimentacaoEstoqueId = movimentacao.MovimentacaoEstoqueId,
+            CodigoProduto = produto.CodigoProduto!,
+            DescricaoProduto = produto.Descricao!,
+            Tipo = movimentacao.Tipo,
+            Descricao = movimentacao.Descricao,
+            Quantidade = movimentacao.Quantidade,
+            EstoqueFinal = movimentacao.EstoqueFinal,
+            DataMovimentacao = movimentacao.DataMovimentacao
+        };
     }
 }

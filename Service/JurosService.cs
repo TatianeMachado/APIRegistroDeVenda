@@ -2,20 +2,19 @@
 
 public class JurosService
 {
+    private readonly IRelogio _relogio;
+
+    public JurosService(IRelogio relogio)
+    {
+        _relogio = relogio;
+    }
+
     public decimal Calcular(
         decimal valor,
         DateOnly dataVencimento)
     {
-        var fuso = TimeZoneInfo.FindSystemTimeZoneById(
-            "America/Sao_Paulo");
-
-        var agora = TimeZoneInfo.ConvertTime(
-            DateTimeOffset.UtcNow,
-            fuso);
-
-        var hoje = DateOnly.FromDateTime(agora.DateTime);
-
-        int diasAtraso = hoje.DayNumber - dataVencimento.DayNumber;
+        int diasAtraso =
+            _relogio.Hoje.DayNumber - dataVencimento.DayNumber;
 
         if (diasAtraso <= 0)
         {

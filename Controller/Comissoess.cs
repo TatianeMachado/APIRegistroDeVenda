@@ -41,9 +41,10 @@ public class Comissoes : ControllerBase
         return Ok(await _service.ConsultarPorFaixaAsync());
     }
 
+  
     [HttpGet("{id}")]
     public async Task<ActionResult<VendaComissaoResponse>> ConsultarPorId(
-        [FromRoute] int id)
+    [FromRoute] int id)
     {
         if (id <= 0)
         {
@@ -56,7 +57,12 @@ public class Comissoes : ControllerBase
         var resultado = await _service.ConsultarPorIdAsync(id);
 
         if (resultado is null)
-            return NotFound(new { mensagem = "Venda não encontrada." });
+        {
+            return NotFound(new
+            {
+                mensagem = "Venda não encontrada."
+            });
+        }
 
         return Ok(resultado);
     }
